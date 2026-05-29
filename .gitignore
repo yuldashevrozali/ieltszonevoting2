@@ -1,0 +1,29 @@
+# 🔐 Sensitive
+.env
+*.key
+*.pem
+
+# 📦 Node
+node_modules/
+npm-debug.log
+
+# 🗄️ Database
+*.mongod.lock
+journal/
+
+# 📝 Logs
+*.log
+logs/
+
+# 💻 IDE
+.vscode/
+.idea/
+*.swp
+
+# 🪟 OS
+.DS_Store
+Thumbs.db
+
+# 🤖 Bot
+sessions/
+downloads/
