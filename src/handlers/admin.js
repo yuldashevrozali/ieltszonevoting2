@@ -192,6 +192,7 @@ async function startBroadcast(ctx) {
 }
 
 // ── ✅ YANGI: Broadcast yuborish funksiyasi ─────────────────────────────────
+// ── ✅ YANGI: Broadcast yuborish funksiyasi (rasm+matn support) ──────────────
 async function sendBroadcast(ctx, message) {
   // Faqat telefon raqami tasdiqlangan userlarga yuboramiz
   const users = await User.find({ phone: { $ne: null } }).lean();
@@ -202,11 +203,13 @@ async function sendBroadcast(ctx, message) {
   for (const user of users) {
     try {
       if (message.photo) {
+        // ✅ Rasm+matn yuborish
         await ctx.telegram.sendPhoto(user.telegramId, message.photo, { 
           caption: message.text,
           parse_mode: 'Markdown'
         });
       } else {
+        // ✅ Faqat matn yuborish
         await ctx.telegram.sendMessage(user.telegramId, message.text, {
           parse_mode: 'Markdown'
         });
@@ -244,7 +247,7 @@ async function sendBroadcast(ctx, message) {
   );
   
   await clearState(ctx.from.id);
-}
+} 
 
 // ── ✅ YANGI: Sovg'a sozlash boshlash ───────────────────────────────────────
 async function startGiftConfig(ctx) {
@@ -268,32 +271,66 @@ async function startGiftConfig(ctx) {
 }
 
 // ── ✅ YANGI: Sovg'ani saqlash ──────────────────────────────────────────────
+// ── ✅ YANGI: Sovg'ani saqlash (rasm+matn support) ───────────────────────────
+// ── ✅ YANGI: Sovg'ani saqlash (HTML parse mode bilan) ──────────────────────
 async function saveGift(ctx, fileId, text) {
-  await Gift.findByIdAndUpdate('config', {
-    text: text || '🎁 Sovg\'alar tez kunda!',
-    fileId: fileId || null,
-    updatedAt: new Date()
-  }, { upsert: true, new: true });
-  
-  await ctx.reply('✅ Sovg\'a muvaffaqiyatli saqlandi! 🎉', 
-    Markup.inlineKeyboard([[Markup.button.callback('🏠 Admin panel', 'admin_back')]])
-  );
-  await clearState(ctx.from.id);
+  try {
+    await Gift.findByIdAndUpdate('config', {
+      text: text || '🎁 Sovg\'alar tez kunda!',
+      fileId: fileId || null,
+      updatedAt: new Date()
+    }, { upsert: true, new: true });
+    
+    // ✅ Matnni HTML uchun escape qilish funksiyasi
+    function escapeHtml(text) {
+      if (!text) return '';
+      return text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+    
+    const safeText = escapeHtml(text || '🎁 Sovg\'alar tez kunda!');
+    const caption = `✅ Sovg'a muvaffaqiyatli saqlandi! 🎉\n\n📝 Matn: ${safeText}`;
+    
+    // ✅ Foydalanuvchiga tasdiqlash xabari
+    if (fileId) {
+      await ctx.replyWithPhoto(fileId, {
+        caption: caption,
+        parse_mode: 'HTML',  // ✅ Markdown o'rniga HTML
+        reply_markup: Markup.inlineKeyboard([[Markup.button.callback('🏠 Admin panel', 'admin_back')]])
+      });
+    } else {
+      await ctx.reply(caption, {
+        parse_mode: 'HTML',  // ✅ Markdown o'rniga HTML
+        reply_markup: Markup.inlineKeyboard([[Markup.button.callback('🏠 Admin panel', 'admin_back')]])
+      });
+    }
+    
+    await clearState(ctx.from.id);
+  } catch (err) {
+    console.error('❌ saveGift xatosi:', err);
+    await ctx.reply('❌ Xatolik yuz berdi! Qaytadan urinib ko\'ring.');
+  }
 }
 
 // ── Matn xabari: state ga qarab qayta ishlash ───────────────────────────────
+// ── Matn yoki Rasm+Matn xabari: state ga qarab qayta ishlash ─────────────────
 async function handleAdminText(ctx) {
   const user = await User.findOne({ telegramId: ctx.from.id });
   if (!user || !user.state) return;
 
-  const text = ctx.message.text?.trim() || ctx.message.caption?.trim() || '';
-  const td   = user.tempData || {};
+  // ✅ Rasm yoki matnni olish (ikkalasi uchun universal)
+  const text = ctx.message?.text?.trim() || ctx.message?.caption?.trim() || '';
+  const fileId = ctx.message?.photo?.[ctx.message.photo.length - 1]?.file_id || null; // Eng sifatli rasm
+  const td = user.tempData || {};
 
   // ✅ Broadcast xabarni qabul qilish
   if (user.state === 'admin_broadcast_waiting') {
     const message = {
       text: text || '📢 Yangi xabar!',
-      photo: ctx.message.photo?.[0]?.file_id || null
+      photo: fileId // ✅ Rasm file_id ni ham o'tkazamiz
     };
     await ctx.reply('🔄 Yuborish boshlandi... Bu biroz vaqt olishi mumkin.');
     await sendBroadcast(ctx, message);
@@ -303,12 +340,11 @@ async function handleAdminText(ctx) {
   // ✅ Sovg'a sozlash
   if (user.state === 'admin_gift_waiting') {
     const giftText = text || '🎁 Sovg\'alar tez kunda!';
-    const fileId = ctx.message.photo?.[0]?.file_id || null;
-    await saveGift(ctx, fileId, giftText);
+    await saveGift(ctx, fileId, giftText); // ✅ fileId ni ham o'tkazamiz
     return;
   }
 
-  // --- vaqt kiritish ---
+  // --- vaqt kiritish (faqat matn) ---
   if (user.state === 'admin_enter_time') {
     if (!isValidTimeSlot(text)) {
       return ctx.reply(
@@ -356,7 +392,7 @@ async function handleAdminText(ctx) {
     );
   }
 
-  // --- nom kiritish ---
+  // --- nom kiritish (faqat matn) ---
   if (user.state === 'admin_enter_name') {
     if (td.action === 'change_name') {
       const oldName = (await Group.findOne({ groupId: td.groupId }))?.name;
@@ -374,7 +410,7 @@ async function handleAdminText(ctx) {
     );
     return showWeekTypeSelect(ctx);
   }
-}
+} 
 
 // ── Hafta kuni tanlangandan so'ng guruh yaratish ─────────────────────────────
 async function handleWeekTypeSelect(ctx, weekType) {

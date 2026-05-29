@@ -1,16 +1,13 @@
 const { Markup } = require('telegraf');
 const Group = require('../models/Group');
 const Teacher = require('../models/Teacher');
+const User = require('../models/User'); // ✅ User modelini import qildik (clearState uchun)
 const config = require('../../config');
 
 // ═══════════════════════════════════════════════════════
 //  ID GENERATOR
 // ═══════════════════════════════════════════════════════
 
-/**
- * Keyingi guruh ID raqamini qaytaradi
- * @returns {Promise<number>}
- */
 async function getNextGroupId() {
   try {
     const last = await Group.findOne().sort({ groupId: -1 });
@@ -21,10 +18,6 @@ async function getNextGroupId() {
   }
 }
 
-/**
- * Keyingi o'qituvchi ID raqamini qaytaradi (agar kerak bo'lsa)
- * @returns {Promise<number>}
- */
 async function getNextTeacherId() {
   try {
     const last = await Teacher.findOne().sort({ telegramId: -1 });
@@ -36,31 +29,36 @@ async function getNextTeacherId() {
 }
 
 // ═══════════════════════════════════════════════════════
-//  VALIDATION FUNCTIONS
+//  STATE MANAGEMENT (Yangi)
 // ═══════════════════════════════════════════════════════
 
 /**
- * Vaqt formatini tekshirish: HH:MM-HH:MM
- * @param {string} str - Tekshiriladigan vaqt stringi
- * @returns {boolean}
+ * User state ni tozalash
+ * @param {number} userId - Telegram user ID
  */
+async function clearState(userId) {
+  await User.findOneAndUpdate(
+    { telegramId: userId }, 
+    { state: null, tempData: {} }
+  );
+}
+
+// ═══════════════════════════════════════════════════════
+//  VALIDATION FUNCTIONS
+// ═══════════════════════════════════════════════════════
+
 function isValidTimeSlot(str) {
   if (!str || typeof str !== 'string') return false;
-  
-  // Format: HH:MM-HH:MM
   const regex = /^\d{2}:\d{2}-\d{2}:\d{2}$/;
   if (!regex.test(str)) return false;
   
-  // Vaqtlarni ajratib olish
   const [start, end] = str.split('-');
   const [startH, startM] = start.split(':').map(Number);
   const [endH, endM] = end.split(':').map(Number);
   
-  // Soat va daqiqa chegaralari
   if (startH < 0 || startH > 23 || startM < 0 || startM > 59) return false;
   if (endH < 0 || endH > 23 || endM < 0 || endM > 59) return false;
   
-  // Boshlanish vaqti tugash vaqtidan oldin bo'lishi kerak
   const startMinutes = startH * 60 + startM;
   const endMinutes = endH * 60 + endM;
   if (startMinutes >= endMinutes) return false;
@@ -68,24 +66,13 @@ function isValidTimeSlot(str) {
   return true;
 }
 
-/**
- * Yoshni tekshirish (5-100 oralig'ida)
- * @param {string|number} age - Tekshiriladigan yosh
- * @returns {boolean}
- */
 function isValidAge(age) {
   const num = parseInt(age);
   return !isNaN(num) && num >= 5 && num <= 100;
 }
 
-/**
- * Telefon raqamini tekshirish (O'zbekiston formati)
- * @param {string} phone - Telefon raqami
- * @returns {boolean}
- */
 function isValidUzbekPhone(phone) {
   if (!phone) return false;
-  // +998 bilan boshlanishi yoki 998 raqamlari
   const cleaned = phone.replace(/^\+/, '').replace(/\s/g, '');
   return cleaned.startsWith('998') && cleaned.length === 12;
 }
@@ -94,14 +81,6 @@ function isValidUzbekPhone(phone) {
 //  PAGINATION HELPERS
 // ═══════════════════════════════════════════════════════
 
-/**
- * Guruhlar uchun sahifali inline keyboard yaratish
- * @param {Array} groups - Guruhlar arrayi
- * @param {number} page - Joriy sahifa (0-indexed)
- * @param {number} teacherId - O'qituvchi ID (pagination uchun)
- * @param {number} pageSize - Har sahifadagi elementlar soni
- * @returns {Object} Reply markup object
- */
 function getPaginatedGroupsKeyboard(groups, page = 0, teacherId, pageSize = 5) {
   if (!Array.isArray(groups)) groups = [];
   
@@ -117,7 +96,6 @@ function getPaginatedGroupsKeyboard(groups, page = 0, teacherId, pageSize = 5) {
     callback_data: `vote_group_${g.groupId}`
   }]));
 
-  // Navigatsiya tugmalari
   const navRow = [];
   if (totalPages > 1) {
     if (currentPage > 0) {
@@ -128,7 +106,7 @@ function getPaginatedGroupsKeyboard(groups, page = 0, teacherId, pageSize = 5) {
     }
     navRow.push({ 
       text: `📄 ${currentPage + 1}/${totalPages}`, 
-      callback_data: 'noop' // Faqat ko'rsatish uchun
+      callback_data: 'noop'
     });
     if (currentPage < totalPages - 1) {
       navRow.push({ 
@@ -138,21 +116,11 @@ function getPaginatedGroupsKeyboard(groups, page = 0, teacherId, pageSize = 5) {
     }
   }
   if (navRow.length) buttons.push(navRow);
-  
-  // Orqaga tugmasi
   buttons.push([{ text: '🔙 Orqaga', callback_data: 'back_to_teachers' }]);
 
   return { reply_markup: { inline_keyboard: buttons } };
 }
 
-/**
- * O'qituvchilar uchun sahifali inline keyboard yaratish (Admin panel)
- * @param {Array} teachers - O'qituvchilar arrayi
- * @param {number} page - Joriy sahifa (0-indexed)
- * @param {string} prefix - Callback data prefixi
- * @param {number} pageSize - Har sahifadagi elementlar soni
- * @returns {Object} { keyboard: Array, pageInfo: string }
- */
 function getPaginatedTeachersKeyboard(teachers, page = 0, prefix = 'admin_teacher_', pageSize = 5) {
   if (!Array.isArray(teachers)) teachers = [];
   
@@ -168,7 +136,6 @@ function getPaginatedTeachersKeyboard(teachers, page = 0, prefix = 'admin_teache
     callback_data: `${prefix}${t.telegramId}`
   }]);
 
-  // Navigatsiya
   const navRow = [];
   if (totalPages > 1) {
     if (currentPage > 0) {
@@ -191,12 +158,6 @@ function getPaginatedTeachersKeyboard(teachers, page = 0, prefix = 'admin_teache
   return { keyboard, pageInfo, totalPages };
 }
 
-/**
- * Umumiy maqsadli pagination yordamchisi
- * @param {Array} items - Elementlar arrayi
- * @param {Object} options - Sozlamalar
- * @returns {Object} { items: Array, pageInfo: string, hasPrev: boolean, hasNext: boolean }
- */
 function paginateItems(items, options = {}) {
   const {
     page = 0,
@@ -217,9 +178,7 @@ function paginateItems(items, options = {}) {
   const pageItems = items.slice(start, start + pageSize);
 
   const keyboard = pageItems.map(item => [{
-    text: typeof textField === 'function' 
-      ? textField(item) 
-      : item[textField] || String(item),
+    text: typeof textField === 'function' ? textField(item) : item[textField] || String(item),
     callback_data: `${prefix}${item[idField] || item._id || item}`
   }]);
 
@@ -239,51 +198,27 @@ function paginateItems(items, options = {}) {
 //  SUBSCRIPTION & AUTH
 // ═══════════════════════════════════════════════════════
 
-/**
- * Foydalanuvchining kanalga obuna ekanligini tekshirish
- * @param {Object} ctx - Telegraf context
- * @returns {Promise<boolean>}
- */
 async function checkSubscription(ctx) {
-  // Agar CHANNEL_USERNAME sozlanmagan bo'lsa, tekshirishni o'tkazib yuboramiz
   if (!config.CHANNEL_USERNAME) return true;
   
   try {
     const channel = `@${config.CHANNEL_USERNAME.replace(/^@/, '')}`;
     const member = await ctx.telegram.getChatMember(channel, ctx.from.id);
-    
-    // Ruxsat berilgan statuslar
     const allowedStatuses = ['member', 'administrator', 'creator'];
     return allowedStatuses.includes(member.status);
-    
   } catch (err) {
-    // Agar bot kanalda admin bo'lmasa yoki boshqa xato
     console.error(`⚠️ checkSubscription xatosi: ${err.message}`);
-    
-    // Ishonchli bo'lmagan holatda false qaytaramiz (xavfsizlik uchun)
-    // Yoki config.da FORCE_SUBSCRIPTION=false bo'lsa true qaytarish mumkin
     return !config.FORCE_SUBSCRIPTION;
   }
 }
 
-/**
- * Foydalanuvchi admin ekanligini tekshirish
- * @param {number} userId - Telegram user ID
- * @returns {boolean}
- */
 function isAdmin(userId) {
-  // config.ADMIN_ID - bitta ID yoki IDlar arrayi bo'lishi mumkin
   if (Array.isArray(config.ADMIN_ID)) {
     return config.ADMIN_ID.includes(userId);
   }
   return userId === config.ADMIN_ID;
 }
 
-/**
- * Foydalanuvchi premium ekanligini tekshirish (kelajak uchun)
- * @param {Object} user - User object
- * @returns {boolean}
- */
 function isPremium(user) {
   return user?.isPremium === true;
 }
@@ -292,20 +227,12 @@ function isPremium(user) {
 //  KEYBOARD HELPERS
 // ═══════════════════════════════════════════════════════
 
-/**
- * Kontakt so'rash uchun keyboard
- * @returns {Object} Markup object
- */
 function getContactKeyboard() {
   return Markup.keyboard([
     [Markup.button.contactRequest('📱 Kontakt ulashish')]
   ]).resize();
 }
 
-/**
- * Asosiy user menu keyboardi (ovozi berilgan userlar uchun)
- * @returns {Object} Inline keyboard object
- */
 function getPostVoteKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback('🎁 Sovg\'alar', 'show_gifts')],
@@ -314,10 +241,6 @@ function getPostVoteKeyboard() {
   ]);
 }
 
-/**
- * Admin panel asosiy keyboardi
- * @returns {Object} Inline keyboard object
- */
 function getAdminPanelKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback('👨‍🏫 O\'qituvchilar', 'admin_teachers'),
@@ -328,11 +251,6 @@ function getAdminPanelKeyboard() {
   ]);
 }
 
-/**
- * Bekor qilish tugmasi bilan keyboard
- * @param {string} backAction - Orqaga qaytish callback actioni
- * @returns {Object} Inline keyboard object
- */
 function getCancelKeyboard(backAction) {
   return Markup.inlineKeyboard([
     [Markup.button.callback('❌ Bekor qilish', backAction || 'admin_back')]
@@ -343,11 +261,6 @@ function getCancelKeyboard(backAction) {
 //  TEXT FORMATTING
 // ═══════════════════════════════════════════════════════
 
-/**
- * Matnni markdown formatida escape qilish
- * @param {string} text - Escape qilinadigan matn
- * @returns {string}
- */
 function escapeMarkdown(text) {
   if (!text) return '';
   const chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!'];
@@ -358,11 +271,6 @@ function escapeMarkdown(text) {
   return result;
 }
 
-/**
- * Matnni HTML formatida escape qilish
- * @param {string} text - Escape qilinadigan matn
- * @returns {string}
- */
 function escapeHtml(text) {
   if (!text) return '';
   return text
@@ -373,33 +281,17 @@ function escapeHtml(text) {
     .replace(/'/g, '&#039;');
 }
 
-/**
- * Raqamni chiroyli formatda ko'rsatish (masalan: 1,234)
- * @param {number} num - Formatlanadigan raqam
- * @returns {string}
- */
 function formatNumber(num) {
   if (typeof num !== 'number' || isNaN(num)) return '0';
   return num.toLocaleString('en-US');
 }
 
-/**
- * Vaqtni chiroyli formatda ko'rsatish
- * @param {string} timeSlot - HH:MM-HH:MM formatidagi vaqt
- * @returns {string}
- */
 function formatTimeSlot(timeSlot) {
   if (!isValidTimeSlot(timeSlot)) return timeSlot || '?';
   const [start, end] = timeSlot.split('-');
   return `${start} — ${end}`;
 }
 
-/**
- * Sanani chiroyli formatda ko'rsatish
- * @param {Date|string} date - Formatlanadigan sana
- * @param {string} locale - Locale (default: 'uz-UZ')
- * @returns {string}
- */
 function formatDate(date, locale = 'uz-UZ') {
   if (!date) return '?';
   const d = new Date(date);
@@ -418,20 +310,10 @@ function formatDate(date, locale = 'uz-UZ') {
 //  UTILS
 // ═══════════════════════════════════════════════════════
 
-/**
- * Promise ni kechiktirish (delay) uchun yordamchi
- * @param {number} ms - Milliseconds
- * @returns {Promise<void>}
- */
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-/**
- * Arrayni tasodifiy tartibda aralashtirish (Fisher-Yates)
- * @param {Array} array - Aralashtiriladigan array
- * @returns {Array}
- */
 function shuffleArray(array) {
   const arr = [...array];
   for (let i = arr.length - 1; i > 0; i--) {
@@ -441,79 +323,42 @@ function shuffleArray(array) {
   return arr;
 }
 
-/**
- * Objectdan faqat kerakli maydonlarni ajratib olish
- * @param {Object} obj - Manba object
- * @param {Array} fields - Kerakli maydonlar
- * @returns {Object}
- */
 function pick(obj, fields) {
   if (!obj || typeof obj !== 'object') return {};
   const result = {};
   for (const field of fields) {
-    if (field in obj) {
-      result[field] = obj[field];
-    }
+    if (field in obj) result[field] = obj[field];
   }
   return result;
 }
 
-/**
- * Objectdan ma'lum maydonlarni chiqarib tashlash
- * @param {Object} obj - Manba object
- * @param {Array} fields - Chiqarib tashlanadigan maydonlar
- * @returns {Object}
- */
 function omit(obj, fields) {
   if (!obj || typeof obj !== 'object') return {};
   const result = {};
   for (const key in obj) {
-    if (!fields.includes(key)) {
-      result[key] = obj[key];
-    }
+    if (!fields.includes(key)) result[key] = obj[key];
   }
   return result;
 }
 
-/**
- * Guruhni chiroyli formatda ko'rsatish uchun matn yaratish
- * @param {Object} group - Group object
- * @param {Object} teacher - Teacher object (ixtiyoriy)
- * @returns {string}
- */
 function formatGroupInfo(group, teacher = null) {
   if (!group) return 'Guruh topilmadi!';
   
   let text = `📚 *${group.name}*\n`;
   text += `🆔 ID: \`${group.groupId}\`\n`;
-  
-  if (teacher?.name) {
-    text += `👨‍🏫 O'qituvchi: *${teacher.name}*\n`;
-  }
-  
+  if (teacher?.name) text += `👨‍🏫 O'qituvchi: *${teacher.name}*\n`;
   text += `⏰ Vaqt: *${formatTimeSlot(group.timeSlot)}*\n`;
   text += `📅 Kunlar: *${group.weekType}*\n`;
   text += `🗳 Ovozlar: *${group.votes}*`;
-  
   return text;
 }
 
-/**
- * O'qituvchini chiroyli formatda ko'rsatish
- * @param {Object} teacher - Teacher object
- * @param {number} groupsCount - Guruhlar soni (ixtiyoriy)
- * @returns {string}
- */
 function formatTeacherInfo(teacher, groupsCount = null) {
   if (!teacher) return 'O\'qituvchi topilmadi!';
   
   let text = `👨‍🏫 *${teacher.name}*\n`;
   text += `🆔 ID: \`${teacher.telegramId}\``;
-  
-  if (groupsCount !== null) {
-    text += `\n📋 Guruhlar: *${groupsCount}*`;
-  }
-  
+  if (groupsCount !== null) text += `\n📋 Guruhlar: *${groupsCount}*`;
   return text;
 }
 
@@ -521,22 +366,10 @@ function formatTeacherInfo(teacher, groupsCount = null) {
 //  BROADCAST HELPERS
 // ═══════════════════════════════════════════════════════
 
-/**
- * Broadcast uchun userlarni filtrlash (faqat tasdiqlangan userlar)
- * @param {Array} users - Barcha userlar
- * @returns {Array}
- */
 function getVerifiedUsers(users) {
   return users.filter(u => u?.phone && u?.phone.startsWith('+998'));
 }
 
-/**
- * Broadcast progress xabarini formatlash
- * @param {number} sent - Yuborilganlar soni
- * @param {number} failed - Xato bo'lganlar soni
- * @param {number} total - Jami userlar soni
- * @returns {string}
- */
 function formatBroadcastProgress(sent, failed, total) {
   const percent = total > 0 ? Math.round((sent / total) * 100) : 0;
   const bar = '█'.repeat(Math.floor(percent / 10)) + '░'.repeat(10 - Math.floor(percent / 10));
@@ -549,13 +382,16 @@ function formatBroadcastProgress(sent, failed, total) {
 }
 
 // ═══════════════════════════════════════════════════════
-//  EXPORTS
+//  ✅ EXPORTS - TO'G'RI TARTIBDA
 // ═══════════════════════════════════════════════════════
 
 module.exports = {
   // ID Generators
   getNextGroupId,
   getNextTeacherId,
+  
+  // ✅ State Management (Yangi qo'shildi)
+  clearState,
   
   // Validators
   isValidTimeSlot,
