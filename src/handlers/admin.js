@@ -230,7 +230,7 @@ async function sendBroadcast(ctx, message) {
     }
     
     // Rate limit uchun ozgina kutish (Telegram limitlari)
-    await new Promise(res => setTimeout(res, 30));
+    await new Promise(res => setTimeout(res, 100));
   }
 
   await ctx.editMessageText(
