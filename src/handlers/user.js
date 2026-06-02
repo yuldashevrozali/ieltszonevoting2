@@ -189,13 +189,18 @@ async function showAlreadyVoted(ctx, existingVote) {
 
 // ── Sovg'alar ─────────────────────────────────────────────────────────────────
 async function showPrizes(ctx) {
-  await ctx.editMessageText(
-    "🎁 Sovg'alar:\n\n" +
-    "🥇 1-o'rin — 1,000,000 so'm\n" +
-    "🥈 2-o'rin — 500,000 so'm\n" +
-    "🥉 3-o'rin — 300,000 so'm",
-    Markup.inlineKeyboard([[Markup.button.callback('Orqaga', 'back_to_voted')]])
-  );
+  const Settings = require('../models/Settings');
+  const photoSetting = await Settings.findOne({ key: 'prize_photo' });
+  const textSetting  = await Settings.findOne({ key: 'prize_text'  });
+
+  const text = textSetting?.value || "Sovg'alar tez kunda e'lon qilinadi!";
+  const keyboard = getPostVoteKeyboard();
+
+  if (photoSetting?.value) {
+    await ctx.replyWithPhoto(photoSetting.value, { caption: text, ...keyboard });
+  } else {
+    await ctx.reply(text, keyboard);
+  }
 }
 
 // ── Top 15 guruh ─────────────────────────────────────────────────────────────
@@ -220,10 +225,7 @@ async function showTop15(ctx) {
     });
   }
 
-  const fn = ctx.callbackQuery ? ctx.editMessageText.bind(ctx) : ctx.reply.bind(ctx);
-  await fn(text.trim(),
-    Markup.inlineKeyboard([[Markup.button.callback('Orqaga', 'back_to_voted')]])
-  );
+  await ctx.reply(text.trim(), getPostVoteKeyboard());
 }
 
 // ── O'qituvchilar ro'yxati (5 tadan) ─────────────────────────────────────────
