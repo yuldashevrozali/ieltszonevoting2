@@ -12,6 +12,10 @@ function getContactKeyboard() {
   return Markup.keyboard([[Markup.button.contactRequest('📱 Kontakt ulashish')]]).resize();
 }
 
+function getPostVoteKeyboard() {
+  return Markup.keyboard([["🎁 Sovg'alar", '🏆 Top 15']]).resize();
+}
+
 // ── /start ────────────────────────────────────────────────────────────────────
 async function handleStart(ctx) {
   const payload    = ctx.startPayload || '';
@@ -172,18 +176,14 @@ async function handleContact(ctx) {
 async function showAlreadyVoted(ctx, existingVote) {
   const vg = await Group.findOne({ groupId: existingVote.groupId });
   const vt = await Teacher.findOne({ telegramId: existingVote.teacherId });
-  const fn = ctx.callbackQuery ? ctx.editMessageText.bind(ctx) : ctx.reply.bind(ctx);
-  await fn(
+  // Har doim reply (yangi xabar) — oddiy keyboard bilan
+  await ctx.reply(
     `Siz allaqachon ovoz bergansiz!\n\n` +
     `Oqituvchi: ${vt?.name || '?'}\n` +
     `Guruh: ${vg?.name || '?'} (#${existingVote.groupId})\n` +
-    `Vaqt: ${vg?.timeSlot || '?'}`,
-    {
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback("🎁 Sovg'alar", 'show_prizes')],
-        [Markup.button.callback('🏆 Top 15 guruh', 'show_top15')]
-      ])
-    }
+    `Vaqt: ${vg?.timeSlot || '?'}\n\n` +
+    `Quyidagi tugmalardan birini bosing:`,
+    getPostVoteKeyboard()
   );
 }
 
