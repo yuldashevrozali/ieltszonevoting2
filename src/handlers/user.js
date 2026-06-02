@@ -3,31 +3,22 @@ const User    = require('../models/User');
 const Teacher = require('../models/Teacher');
 const Group   = require('../models/Group');
 const Vote    = require('../models/Vote');
-const Gift    = require('../models/Gift');
-const { checkSubscription, getPaginatedGroupsKeyboard, escapeHtml } = require('../utils/helpers');
+const { checkSubscription, getPaginatedGroupsKeyboard } = require('../utils/helpers');
 const config  = require('../../config');
 
-// ── Kontakt keyboard ─────────────────────────────────────────────────────────
+const PAGE_SIZE = 5;
+
 function getContactKeyboard() {
   return Markup.keyboard([[Markup.button.contactRequest('📱 Kontakt ulashish')]]).resize();
 }
 
-// ── ✅ Post-vote menu (FAQT 2 TA TUGMA) ─────────────────────────────────────
-function getPostVoteKeyboard() {
-  return Markup.keyboard([
-    ['🎁 Sovg\'alar', '🏆 Top 15']
-  ]).resize();
-}
-
-// ── /start — Asosiy Logic (Referral Support) ────────────────────────────────
+// ── /start ────────────────────────────────────────────────────────────────────
 async function handleStart(ctx) {
-  const payload  = ctx.startPayload || '';
-  const refMatch = payload.match(/^ref_(\d+)$/);
+  const payload    = ctx.startPayload || '';
+  const refMatch   = payload.match(/^ref_(\d+)$/);
   const refGroupId = refMatch ? parseInt(refMatch[1]) : null;
 
   let user = await User.findOne({ telegramId: ctx.from.id });
-  
-  // Yangi user bo'lsa, saqlaymiz
   if (!user) {
     user = new User({
       telegramId: ctx.from.id,
@@ -38,175 +29,213 @@ async function handleStart(ctx) {
     await user.save();
   }
 
-  // ✅ 1-QADAM: Agar user ALLAQACHON ovoz bergan bo'lsa
+  // Referral ID ni saqlab qo'yish
+  if (refGroupId) {
+    await User.findOneAndUpdate({ telegramId: ctx.from.id }, { 'tempData.refGroupId': refGroupId });
+    user = await User.findOne({ telegramId: ctx.from.id });
+  }
+
+  // Avval ovoz bergan bo'lsa
   const existingVote = await Vote.findOne({ userId: ctx.from.id });
   if (existingVote) {
-    const vg = await Group.findOne({ groupId: existingVote.groupId });
-    const vt = await Teacher.findOne({ telegramId: existingVote.teacherId });
-    return ctx.reply(
-      `🎉 Siz allaqachon ovoz bergansiz!\n\n` +
-      `Oqituvchi: ${vt?.name || '?'}\n` +
-      `Guruh: ${vg?.name || '?'} (#${existingVote.groupId})\n` +
-      `Vaqt: ${vg?.timeSlot || '?'}\n\n` +
-      `🎁 "Sovg'alar" tugmasini bosib sovrinlarni ko'ring\n` +
-      `🏆 "Top 15" tugmasini bosib yetakchi guruhlarni ko'ring`,
-      getPostVoteKeyboard()
+    return showAlreadyVoted(ctx, existingVote);
+  }
+
+  // Ro'yxatdan o'tish jarayoni — navbatdagi qadamga o'tkazish
+  return continueRegistration(ctx, user);
+}
+
+// Ro'yxatdan o'tish qadamlarini boshqarish
+async function continueRegistration(ctx, user) {
+  // 1. Kanal obunasi
+  const ok = await checkSubscription(ctx);
+  if (!ok) return showSubscriptionPrompt(ctx);
+
+  // 2. Ism
+  if (!user.fullName) {
+    await User.findOneAndUpdate({ telegramId: ctx.from.id }, { state: 'enter_name' });
+    const fn = ctx.callbackQuery ? ctx.editMessageText.bind(ctx) : ctx.reply.bind(ctx);
+    return fn(
+      "Kanalga a'zo bo'lganingiz uchun rahmat!\n\nIsmingizni kiriting (to'liq ism):\nMisol: Sardor Usmonov",
+      ctx.callbackQuery ? {} : Markup.removeKeyboard()
     );
   }
 
-  // ✅ 2-QADAM: Telefon raqam yo'q bo'lsa so'rash
+  // 3. Yosh
+  if (!user.age) {
+    await User.findOneAndUpdate({ telegramId: ctx.from.id }, { state: 'enter_age' });
+    const fn = ctx.callbackQuery ? ctx.editMessageText.bind(ctx) : ctx.reply.bind(ctx);
+    return fn('Yoshingizni kiriting (faqat raqam):\nMisol: 22');
+  }
+
+  // 4. Telefon
   if (!user.phone) {
-    if (refGroupId) {
-      await User.findOneAndUpdate({ telegramId: ctx.from.id }, { tempData: { refGroupId } });
-    }
+    await User.findOneAndUpdate({ telegramId: ctx.from.id }, { state: 'enter_phone' });
     return ctx.reply(
-      `Salom, ${ctx.from.first_name || 'Do\'st'}!\n\nBotdan foydalanish uchun telefon raqamingizni ulashing.\n\nPastdagi tugmani bosing:`,
+      'Telefon raqamingizni ulashing:',
       getContactKeyboard()
     );
   }
 
-  // ✅ 3-QADAM: Kanal obunasini tekshirish
-  const ok = await checkSubscription(ctx);
-  if (!ok) {
-    if (refGroupId) {
-      await User.findOneAndUpdate({ telegramId: ctx.from.id }, { tempData: { refGroupId } });
-    }
-    return showSubscriptionPrompt(ctx);
+  // Hamma to'ldirilgan — asosiy oqim
+  await User.findOneAndUpdate({ telegramId: ctx.from.id }, { state: null });
+  const td = user.tempData || {};
+  if (td.refGroupId) {
+    await User.findOneAndUpdate({ telegramId: ctx.from.id }, { 'tempData.refGroupId': null });
+    return showVoteConfirm(ctx, td.refGroupId, true);
   }
-
-  // ✅ 4-QADAM: Agar referral link orqali kelgan bo'lsa → To'g'ri tasdiqlashga o'tish
-  if (refGroupId) {
-    return showVoteConfirm(ctx, refGroupId, true);
-  }
-
-  // ✅ 5-QADAM: Oddiy flow → O'qituvchilar ro'yxati
   await showTeachersList(ctx);
 }
 
-// ── Kanal obunasi prompt ────────────────────────────────────────────────────
+// ── Kanal obunasi ─────────────────────────────────────────────────────────────
 async function showSubscriptionPrompt(ctx) {
   const channelLink = config.CHANNEL_USERNAME ? `https://t.me/${config.CHANNEL_USERNAME}` : '#';
   const fn = ctx.callbackQuery ? ctx.editMessageText.bind(ctx) : ctx.reply.bind(ctx);
-  await fn(`Davom etish uchun kanalimizga a'zo bo'ling:`, {
+  await fn("Botdan foydalanish uchun kanalimizga a'zo bo'ling:", {
     ...Markup.inlineKeyboard([
-      [Markup.button.url('📢 Kanalga o\'tish', channelLink)],
-      [Markup.button.callback("✅ A'zo bo'ldim", 'check_subscription')]
+      [Markup.button.url("Kanalga o'tish", channelLink)],
+      [Markup.button.callback("A'zo bo'ldim", 'check_subscription')]
     ])
-  });
-}
-
-// ── ✅ Sovg'alarni ko'rsatish (HTML parse mode + rasm support) ───────────────
-async function showGifts(ctx) {
-  const gift = await Gift.findById('config');
-  const rawText = gift?.text || '🎁 Sovg\'alar tez kunda e\'lon qilinadi!';
-  
-  const safeText = escapeHtml ? escapeHtml(rawText) : rawText
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-  
-  const keyboard = Markup.inlineKeyboard([[Markup.button.callback('🔙 Orqaga', 'back_post_vote')]]);
-  
-  if (ctx.callbackQuery) {
-    if (gift?.fileId) {
-      try {
-        await ctx.editMessageMedia({
-          type: 'photo',
-          media: gift.fileId,
-          caption: safeText,
-          parse_mode: 'HTML'
-        }, { reply_markup: keyboard });
-      } catch (err) {
-        await ctx.replyWithPhoto(gift.fileId, {
-          caption: safeText,
-          parse_mode: 'HTML',
-          reply_markup: keyboard
-        });
-        await ctx.deleteMessage().catch(() => {});
-      }
-    } else {
-      await ctx.editMessageText(safeText, { 
-        parse_mode: 'HTML',
-        reply_markup: keyboard 
-      });
-    }
-  } else {
-    if (gift?.fileId) {
-      await ctx.replyWithPhoto(gift.fileId, {
-        caption: safeText,
-        parse_mode: 'HTML',
-        reply_markup: keyboard
-      });
-    } else {
-      await ctx.reply(safeText, {
-        parse_mode: 'HTML',
-        reply_markup: keyboard
-      });
-    }
-  }
-}
-
-// ── ✅ Top 15 guruhlarni ko'rsatish (Teacher + Time qo'shildi) ───────────────
-async function showTop15(ctx) {
-  const topGroups = await Group.find().sort({ votes: -1 }).limit(15).lean();
-  
-  if (!topGroups.length) {
-    const fn = ctx.callbackQuery ? ctx.editMessageText.bind(ctx) : ctx.reply.bind(ctx);
-    return fn('📊 Hozircha statistik ma\'lumot yo\'q.', {
-      reply_markup: Markup.inlineKeyboard([[Markup.button.callback('🔙 Orqaga', 'back_post_vote')]])
-    });
-  }
-
-  const teacherIds = [...new Set(topGroups.map(g => g.teacherId))];
-  const teachers = await Teacher.find({ telegramId: { $in: teacherIds } }).lean();
-  const teacherMap = {};
-  teachers.forEach(t => { teacherMap[t.telegramId] = t.name; });
-
-  let message = '🏆 <b>TOP 15 GURUH</b>\n\n';
-  
-  topGroups.forEach((g, i) => {
-    const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`;
-    const teacherName = teacherMap[g.teacherId] || 'Noma\'lum';
-    const timeSlot = g.timeSlot || 'Vaqt belgilanmagan';
-
-    message += `${medal} <b>${escapeHtml(g.name)}</b>\n`;
-    message += `👨‍🏫 ${escapeHtml(teacherName)} | ⏰ ${escapeHtml(timeSlot)} | 🗳 <i>${g.votes} ovoz</i>\n\n`;
-  });
-
-  const fn = ctx.callbackQuery ? ctx.editMessageText.bind(ctx) : ctx.reply.bind(ctx);
-  await fn(message.trim(), {
-    parse_mode: 'HTML',
-    reply_markup: Markup.inlineKeyboard([[Markup.button.callback('🔙 Orqaga', 'back_post_vote')]])
   });
 }
 
 async function checkAndAskSubscription(ctx, user) {
   const ok = await checkSubscription(ctx);
   if (!ok) return showSubscriptionPrompt(ctx);
-  
-  const td = user.tempData || {};
-  if (td.refGroupId) {
-    await User.findOneAndUpdate({ telegramId: ctx.from.id }, { tempData: {} });
-    return showVoteConfirm(ctx, td.refGroupId, true);
-  }
-  await showTeachersList(ctx);
+  user = await User.findOne({ telegramId: ctx.from.id });
+  await continueRegistration(ctx, user);
 }
 
-// ── O'qituvchilar ro'yxati (5 tadan sahifali) ───────────────────────────────
-async function showTeachersList(ctx, page = 0) {
-  const PAGE_SIZE = 5;
-  const teachers = await Teacher.find().sort({ name: 1 });
-  
-  if (!teachers.length) {
-    const fn = ctx.callbackQuery ? ctx.editMessageText.bind(ctx) : ctx.reply.bind(ctx);
-    return fn('Hozircha oqituvchilar yo\'q.');
+// ── Matn xabarlarni qayta ishlash (FSM) ─────────────────────────────────────
+async function handleUserText(ctx) {
+  const user = await User.findOne({ telegramId: ctx.from.id });
+  if (!user) return;
+
+  const text = ctx.message.text.trim();
+
+  // Telefon raqami yo'q va kontakt so'ralganda — boshqa matn yuborganda
+  if (!user.phone && user.state === 'enter_phone') {
+    return ctx.reply('Iltimos, pastdagi tugma orqali kontakt ulashing:', getContactKeyboard());
   }
 
-  const total = teachers.length;
-  const totalPages = Math.ceil(total / PAGE_SIZE);
-  const start = page * PAGE_SIZE;
-  const pageTeachers = teachers.slice(start, start + PAGE_SIZE);
+  // Ism kiritish
+  if (user.state === 'enter_name') {
+    if (text.length < 2 || text.length > 60) {
+      return ctx.reply("Iltimos, to'liq ismingizni kiriting (2-60 harf):");
+    }
+    await User.findOneAndUpdate({ telegramId: ctx.from.id }, { fullName: text, state: 'enter_age' });
+    return ctx.reply(`Rahmat, ${text}!\n\nYoshingizni kiriting (faqat raqam):\nMisol: 22`);
+  }
+
+  // Yosh kiritish
+  if (user.state === 'enter_age') {
+    const age = parseInt(text);
+    if (isNaN(age) || age < 5 || age > 100) {
+      return ctx.reply('Iltimos, yoshingizni to\'g\'ri kiriting (5-100 oralig\'ida):');
+    }
+    await User.findOneAndUpdate({ telegramId: ctx.from.id }, { age, state: 'enter_phone' });
+    return ctx.reply('Yoshingiz saqlandi!\n\nEndi telefon raqamingizni ulashing:', getContactKeyboard());
+  }
+
+  // Ovoz bergan bo'lsa — matn yuborganda ham ko'rsatish
+  const existingVote = await Vote.findOne({ userId: ctx.from.id });
+  if (existingVote) return showAlreadyVoted(ctx, existingVote);
+
+  // Telefon yo'q
+  if (!user.phone) {
+    return ctx.reply('Avval telefon raqamingizni ulashing!', getContactKeyboard());
+  }
+}
+
+// ── Kontakt ───────────────────────────────────────────────────────────────────
+async function handleContact(ctx) {
+  const contact = ctx.message.contact;
+  if (contact.user_id !== ctx.from.id)
+    return ctx.reply('Iltimos, oz kontaktingizni yuboring!', getContactKeyboard());
+
+  let phone = contact.phone_number;
+  if (phone.startsWith('+')) phone = phone.slice(1);
+  if (!phone.startsWith('998'))
+    return ctx.reply("+998 bilan boshlanadigan O'zbekiston raqamini ulashing:", getContactKeyboard());
+
+  await User.findOneAndUpdate(
+    { telegramId: ctx.from.id },
+    { phone: contact.phone_number, state: null },
+    { upsert: true }
+  );
+  await ctx.reply('Telefon raqamingiz saqlandi!', Markup.removeKeyboard());
+  const user = await User.findOne({ telegramId: ctx.from.id });
+  await continueRegistration(ctx, user);
+}
+
+// ── Allaqachon ovoz bergan ────────────────────────────────────────────────────
+async function showAlreadyVoted(ctx, existingVote) {
+  const vg = await Group.findOne({ groupId: existingVote.groupId });
+  const vt = await Teacher.findOne({ telegramId: existingVote.teacherId });
+  const fn = ctx.callbackQuery ? ctx.editMessageText.bind(ctx) : ctx.reply.bind(ctx);
+  await fn(
+    `Siz allaqachon ovoz bergansiz!\n\n` +
+    `Oqituvchi: ${vt?.name || '?'}\n` +
+    `Guruh: ${vg?.name || '?'} (#${existingVote.groupId})\n` +
+    `Vaqt: ${vg?.timeSlot || '?'}`,
+    {
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("🎁 Sovg'alar", 'show_prizes')],
+        [Markup.button.callback('🏆 Top 15 guruh', 'show_top15')]
+      ])
+    }
+  );
+}
+
+// ── Sovg'alar ─────────────────────────────────────────────────────────────────
+async function showPrizes(ctx) {
+  await ctx.editMessageText(
+    "🎁 Sovg'alar:\n\n" +
+    "🥇 1-o'rin — 1,000,000 so'm\n" +
+    "🥈 2-o'rin — 500,000 so'm\n" +
+    "🥉 3-o'rin — 300,000 so'm",
+    Markup.inlineKeyboard([[Markup.button.callback('Orqaga', 'back_to_voted')]])
+  );
+}
+
+// ── Top 15 guruh ─────────────────────────────────────────────────────────────
+async function showTop15(ctx) {
+  const groups   = await Group.find().sort({ votes: -1 }).limit(15).lean();
+  const teachers = await Teacher.find().lean();
+  const tMap = {}; teachers.forEach(t => { tMap[t.telegramId] = t.name; });
+
+  let text = "TOP 15 GURUH:\n\n";
+  const medals = ['1.','2.','3.','4.','5.','6.','7.','8.','9.','10.','11.','12.','13.','14.','15.'];
+
+  if (!groups.length) {
+    text += "Hali ovozlar yoq.";
+  } else {
+    groups.forEach((g, i) => {
+      // Faqat boshlanish vaqtini olish: "11:20-12:50" -> "11:20"
+      const startTime = g.timeSlot ? g.timeSlot.split('-')[0] : '?';
+      const weekType  = g.weekType || '';
+      const medal = medals[i] || `${i + 1}.`;
+      text += `${medal} ${tMap[g.teacherId] || '?'} | ${g.name}\n`;
+      text += `   ${startTime} | ${weekType} | ${g.votes} ovoz\n\n`;
+    });
+  }
+
+  const fn = ctx.callbackQuery ? ctx.editMessageText.bind(ctx) : ctx.reply.bind(ctx);
+  await fn(text.trim(),
+    Markup.inlineKeyboard([[Markup.button.callback('Orqaga', 'back_to_voted')]])
+  );
+}
+
+// ── O'qituvchilar ro'yxati (5 tadan) ─────────────────────────────────────────
+async function showTeachersList(ctx, page = 0) {
+  const teachers = await Teacher.find().sort({ name: 1 });
+  if (!teachers.length) {
+    const fn = ctx.callbackQuery ? ctx.editMessageText.bind(ctx) : ctx.reply.bind(ctx);
+    return fn('Hozircha oqituvchilar yoq.');
+  }
+
+  const totalPages  = Math.ceil(teachers.length / PAGE_SIZE);
+  const pageTeachers = teachers.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
 
   const keyboard = pageTeachers.map(t => ([{
     text: `👨‍🏫 ${t.name}`,
@@ -214,8 +243,8 @@ async function showTeachersList(ctx, page = 0) {
   }]));
 
   const navRow = [];
-  if (page > 0) navRow.push({ text: '⬅️ Oldingi', callback_data: `teachers_page_${page - 1}` });
-  if (page < totalPages - 1) navRow.push({ text: 'Keyingi ➡️', callback_data: `teachers_page_${page + 1}` });
+  if (page > 0)               navRow.push({ text: '⬅️ Oldingi', callback_data: `teachers_page_${page - 1}` });
+  if (page < totalPages - 1)  navRow.push({ text: 'Keyingi ➡️', callback_data: `teachers_page_${page + 1}` });
   if (navRow.length) keyboard.push(navRow);
 
   const pageInfo = totalPages > 1 ? ` (${page + 1}/${totalPages})` : '';
@@ -229,12 +258,11 @@ async function showTeachersList(ctx, page = 0) {
 async function showTeacherGroups(ctx, teacherId, page = 0) {
   const teacher = await Teacher.findOne({ telegramId: parseInt(teacherId) });
   if (!teacher) return ctx.answerCbQuery('Topilmadi!');
-  
   const groups = await Group.find({ teacherId: teacher.telegramId }).sort({ groupId: 1 });
   if (!groups.length) {
     return ctx.editMessageText(
       `${teacher.name} uchun guruh mavjud emas.`,
-      Markup.inlineKeyboard([[Markup.button.callback('🔙 Orqaga', 'back_to_teachers')]])
+      Markup.inlineKeyboard([[Markup.button.callback('Orqaga', 'back_to_teachers')]])
     );
   }
   await ctx.editMessageText(
@@ -248,157 +276,72 @@ async function showVoteConfirm(ctx, groupId, fromRef = false) {
   const group = await Group.findOne({ groupId: parseInt(groupId) });
   if (!group) {
     const fn = ctx.callbackQuery ? ctx.editMessageText.bind(ctx) : ctx.reply.bind(ctx);
-    return fn('❌ Guruh topilmadi!');
+    return fn('Guruh topilmadi!');
   }
   const teacher = await Teacher.findOne({ telegramId: group.teacherId });
 
-  // ✅ Tekshirish: User allaqachon ovoz berganmi?
   const existing = await Vote.findOne({ userId: ctx.from.id });
-  if (existing) {
-    const vg = await Group.findOne({ groupId: existing.groupId });
-    const vt = await Teacher.findOne({ telegramId: existing.teacherId });
-    const fn = ctx.callbackQuery ? ctx.editMessageText.bind(ctx) : ctx.reply.bind(ctx);
-    return fn(
-      `🎉 Siz allaqachon ovoz bergansiz!\n\n` +
-      `Oqituvchi: ${vt?.name || '?'}\n` +
-      `Guruh: ${vg?.name || '?'} (#${existing.groupId})\n` +
-      `Vaqt: ${vg?.timeSlot || '?'}\n\n` +
-      `⚠️ Har bir foydalanuvchi faqat 1 marta ovoz berishi mumkin.`,
-      Markup.inlineKeyboard([[Markup.button.callback('🏠 Bosh menyu', 'back_to_teachers')]])
-    );
-  }
+  if (existing) return showAlreadyVoted(ctx, existing);
 
-  const refNote = fromRef ? `\n\n✨ Siz taklif havolasi orqali keldingiz.` : '';
-  const backBtn = fromRef ? 'back_to_teachers' : `user_teacher_${group.teacherId}`;
-  
+  const refNote  = fromRef ? '\n\nSiz taklif havolasi orqali keldingiz.' : '';
+  const backBtn  = fromRef ? 'back_to_teachers' : `user_teacher_${group.teacherId}`;
   const fn = ctx.callbackQuery ? ctx.editMessageText.bind(ctx) : ctx.reply.bind(ctx);
   await fn(
-    `🗳️ Ovoz berish\n\n` +
-    `👨‍🏫 Oqituvchi: ${teacher?.name || '?'}\n` +
-    `📚 Guruh: ${group.name}\n` +
-    `⏰ Vaqt: ${group.timeSlot}\n` +
-    `📅 Kunlar: ${group.weekType}\n` +
-    `🔢 Joriy ovozlar: ${group.votes}` +
+    `Ovoz berish\n\n` +
+    `Oqituvchi: ${teacher?.name || '?'}\n` +
+    `Guruh: ${group.name}\n` +
+    `Vaqt: ${group.timeSlot}\n` +
+    `Kunlar: ${group.weekType}\n` +
+    `Joriy ovozlar: ${group.votes}` +
     refNote +
-    `\n\n⚠️ Diqqat: Faqat 1 marta ovoz berish mumkin!\n\nOvoz bermoqchimisiz?`,
+    `\n\nDiqqat: Faqat 1 marta ovoz berish mumkin!\n\nOvoz bermoqchimisiz?`,
     {
       ...Markup.inlineKeyboard([
-        [Markup.button.callback('✅ Ha, tasdiqlayman!', `confirm_vote_${group.groupId}`)],
-        [Markup.button.callback('❌ Yoq, orqaga', backBtn)]
+        [Markup.button.callback('Ha, tasdiqlayman!', `confirm_vote_${group.groupId}`)],
+        [Markup.button.callback('Yoq, orqaga', backBtn)]
       ])
     }
   );
 }
 
-// ── ✅ OVOZ BERISH — Asosiy Logic (Referral Link bilan) ─────────────────────
+// ── Ovoz berish ───────────────────────────────────────────────────────────────
 async function castVote(ctx, groupId) {
   const group = await Group.findOne({ groupId: parseInt(groupId) });
-  if (!group) return ctx.answerCbQuery('❌ Guruh topilmadi!', { show_alert: true });
-  
+  if (!group) return ctx.answerCbQuery('Guruh topilmadi!', { show_alert: true });
   const teacher = await Teacher.findOne({ telegramId: group.teacherId });
+
   const existing = await Vote.findOne({ userId: ctx.from.id });
-  
-  if (existing) return ctx.answerCbQuery('⚠️ Siz allaqachon ovoz bergansiz!', { show_alert: true });
+  if (existing) return ctx.answerCbQuery('Siz allaqachon ovoz bergansiz!', { show_alert: true });
 
   try {
-    // 1. Ovozni saqlash
-    await Vote.create({ 
-      userId: ctx.from.id, 
-      groupId: group.groupId, 
-      teacherId: group.teacherId 
-    });
-    
-    // 2. Guruh ovozlari sonini oshirish
+    await Vote.create({ userId: ctx.from.id, groupId: group.groupId, teacherId: group.teacherId });
     await Group.updateOne({ groupId: group.groupId }, { $inc: { votes: 1 } });
     const updated = await Group.findOne({ groupId: group.groupId });
 
-    // 3. ✅ REFERRAL LINK yaratish
-    const botUsername = ctx.botInfo?.username;
+    const botUsername = ctx.botInfo?.username || '';
     const refLink = `https://t.me/${botUsername}?start=ref_${group.groupId}`;
 
-    // 4. ✅ MUVAFFAQIYAT XABARI + REFERRAL LINK + KEYBOARD
     await ctx.editMessageText(
-      `✅ <b>Ovozingiz qabul qilindi!</b>\n\n` +
-      `👨‍🏫 Oqituvchi: ${teacher?.name || '?'}\n` +
-      `📚 Guruh: ${group.name}\n` +
-      `⏰ Vaqt: ${group.timeSlot}\n` +
-      `📅 Kunlar: ${group.weekType}\n` +
-      `🔢 Guruh ovozlari: ${updated.votes}\n\n` +
-      `🔗 <b>Sizning referral havolangiz:</b>\n<code>${refLink}</code>\n\n` +
-      `💡 Bu havolani do'stlaringizga yuboring!\n` +
-      `Ularning ovozi ham avtomatik <b>${group.name}</b> guruhiga qo'shiladi! 🚀`,
-      {
-        parse_mode: 'HTML',
-        reply_markup: Markup.inlineKeyboard([[Markup.button.callback('🔙 Orqaga', 'back_post_vote')]])
-      }
+      `Ovozingiz qabul qilindi!\n\n` +
+      `Oqituvchi: ${teacher?.name || '?'}\n` +
+      `Guruh: ${group.name}\n` +
+      `Vaqt: ${group.timeSlot}\n` +
+      `Kunlar: ${group.weekType}\n` +
+      `Guruh ovozlari: ${updated.votes}\n\n` +
+      `Sizning referral havolangiz:\n${refLink}\n\n` +
+      `Bu havola orqali kirgan yangi foydalanuvchi avtomatik bu guruhga ovoz berishga yonaltiriladi!`,
+      Markup.inlineKeyboard([[Markup.button.callback('Bosh menyu', 'back_to_teachers')]])
     );
-    
-    // 5. ✅ Oddiy keyboard tugmalari (2 ta)
-    await ctx.reply('Tanlov uchun rahmat! 🎉', getPostVoteKeyboard());
-    
   } catch (err) {
-    if (err.code === 11000) {
-      return ctx.answerCbQuery('⚠️ Siz allaqachon ovoz bergansiz!', { show_alert: true });
-    }
-    console.error('❌ castVote xatosi:', err);
-    return ctx.answerCbQuery('❌ Xatolik yuz berdi!', { show_alert: true });
+    if (err.code === 11000) return ctx.answerCbQuery('Siz allaqachon ovoz bergansiz!', { show_alert: true });
+    throw err;
   }
-}
-
-// ── Kontakt handler ─────────────────────────────────────────────────────────
-async function handleContact(ctx) {
-  const contact = ctx.message.contact;
-  if (contact.user_id !== ctx.from.id)
-    return ctx.reply('Iltimos, o\'z kontaktingizni yuboring!', getContactKeyboard());
-
-  let phone = contact.phone_number;
-  if (phone.startsWith('+')) phone = phone.slice(1);
-  if (!phone.startsWith('998'))
-    return ctx.reply("Faqat O'zbekiston raqamlari (+998) qabul qilinadi!\n\nIltimos, O'zbekiston raqamingizni ulashing:", getContactKeyboard());
-
-  await User.findOneAndUpdate(
-    { telegramId: ctx.from.id },
-    { phone: contact.phone_number, firstName: ctx.from.first_name || '', lastName: ctx.from.last_name || '' },
-    { upsert: true }
-  );
-  await ctx.reply('✅ Telefon raqamingiz saqlandi!', Markup.removeKeyboard());
-  
-  const user = await User.findOne({ telegramId: ctx.from.id });
-  await checkAndAskSubscription(ctx, user);
-}
-
-// ── Telefonsiz matn handler ─────────────────────────────────────────────────
-async function handleTextWithoutPhone(ctx) {
-  const user = await User.findOne({ telegramId: ctx.from.id });
-  if (!user || !user.phone)
-    return ctx.reply('Avval telefon raqamingizni ulashing!', getContactKeyboard());
-}
-
-// ── ✅ Post-vote oddiy keyboard tugmalari handleri (FAQT 2 TA) ───────────────
-async function handlePostVoteButtons(ctx) {
-  const text = ctx.message.text;
-  
-  if (text === '🎁 Sovg\'alar') {
-    return showGifts(ctx);
-  }
-  
-  if (text === '🏆 Top 15') {
-    return showTop15(ctx);
-  }
-  
-  return;
 }
 
 module.exports = {
-  handleStart, 
-  handleContact, 
-  handleTextWithoutPhone,
-  handlePostVoteButtons,
-  checkAndAskSubscription, 
-  showTeachersList,
-  showTeacherGroups, 
-  showVoteConfirm, 
-  castVote,
-  showGifts,
-  showTop15
+  handleStart, handleContact, handleUserText,
+  checkAndAskSubscription,
+  showTeachersList, showTeacherGroups,
+  showVoteConfirm, castVote,
+  showAlreadyVoted, showPrizes, showTop15
 };
