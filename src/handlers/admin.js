@@ -4,7 +4,9 @@ const Group    = require('../models/Group');
 const Vote     = require('../models/Vote');
 const User     = require('../models/User');
 const Gift     = require('../models/Gift'); // ✅ Yangi model
+const Settings = require('../models/Settings'); // ✅ Turnir holati
 const { getNextGroupId, isValidTimeSlot, isAdmin } = require('../utils/helpers');
+const { buildVotersPdf } = require('../utils/pdf');
 
 // ── Yordamchi: state o'rnatish/tozalash ─────────────────────────────────────
 async function setState(userId, state, tempData = {}) {
@@ -18,30 +20,219 @@ async function clearState(userId) {
 async function showAdminPanel(ctx) {
   if (!isAdmin(ctx.from.id)) return ctx.reply('❌ Sizda admin huquqi yo\'q!');
   
-  const [tc, gc, vc, uc] = await Promise.all([
-    Teacher.countDocuments(), 
-    Group.countDocuments(), 
+  const [tc, gc, vc, uc, settings] = await Promise.all([
+    Teacher.countDocuments(),
+    Group.countDocuments(),
     Vote.countDocuments(),
-    User.countDocuments() // ✅ Jami userlar
+    User.countDocuments(), // ✅ Jami userlar
+    Settings.get()         // ✅ Turnir holati
   ]);
-  
+
+  const votingClosed = !!settings.votingClosed;
+  const statusLine = votingClosed
+    ? `🔴 Turnir holati: *TUGATILGAN* (ovoz berish yopiq)`
+    : `🟢 Turnir holati: *FAOL* (ovoz berish ochiq)`;
+
+  const tournamentBtn = votingClosed
+    ? Markup.button.callback('🔓 Turnirni qayta ochish', 'admin_reopen_tournament')
+    : Markup.button.callback('🛑 Turnirni tugatish', 'admin_end_tournament');
+
   await ctx.reply(
     `🔐 *ADMIN PANEL*\n\n` +
     `👥 Jami userlar: *${uc}*\n` +
     `👨‍🏫 O'qituvchilar: *${tc}*\n` +
     `📋 Guruhlar: *${gc}*\n` +
-    `🗳 Jami ovozlar: *${vc}*`,
+    `🗳 Jami ovozlar: *${vc}*\n\n` +
+    `${statusLine}`,
     {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
         [Markup.button.callback('👨‍🏫 O\'qituvchilar', 'admin_teachers')],
         [Markup.button.callback('📋 Guruhlar',       'admin_groups')],
         [Markup.button.callback('📊 Statistika',     'admin_stats')],
+        [Markup.button.callback('📄 Ovoz berganlar (PDF)', 'admin_voters_pdf')], // ✅ Yangi
         [Markup.button.callback('📢 Broadcast',      'admin_broadcast')],    // ✅ Yangi
-        [Markup.button.callback('🎁 Sovg\'a sozlash', 'admin_gift_config')]  // ✅ Yangi
+        [Markup.button.callback('🎁 Sovg\'a sozlash', 'admin_gift_config')], // ✅ Yangi
+        [tournamentBtn]                                                       // ✅ Yangi
       ])
     }
   );
+}
+
+// ── ✅ YANGI: Turnirni tugatish — tasdiq so'rash ────────────────────────────
+async function confirmEndTournament(ctx) {
+  if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('❌ Ruxsat yo\'q!');
+  await ctx.editMessageText(
+    `🛑 *TURNIRNI TUGATISH*\n\n` +
+    `Bu amaldan keyin:\n` +
+    `• Ovoz yig'ish butunlay to'xtaydi\n` +
+    `• Hech kim, hech qanday yo'l bilan ovoz bera olmaydi\n` +
+    `• Referral havolalar ham ishlamaydi\n\n` +
+    `Ovozlar va statistika saqlanib qoladi.\n\n` +
+    `Rostan ham turnirni tugatasizmi?`,
+    {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('✅ Ha, turnirni tugatish', 'admin_end_tournament_confirm')],
+        [Markup.button.callback('🔙 Yo\'q, orqaga', 'admin_back')]
+      ])
+    }
+  );
+}
+
+// ── ✅ YANGI: Turnirni tugatish — bajarish ──────────────────────────────────
+async function endTournament(ctx) {
+  if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('❌ Ruxsat yo\'q!');
+  await Settings.findByIdAndUpdate(
+    'config',
+    { votingClosed: true, closedAt: new Date(), updatedAt: new Date() },
+    { upsert: true, new: true }
+  );
+  await ctx.editMessageText(
+    `🛑 *Turnir tugatildi!*\n\n` +
+    `Ovoz berish butunlay yopildi. Endi hech kim ovoz bera olmaydi.\n` +
+    `Kerak bo'lsa, keyinroq qayta ochishingiz mumkin.`,
+    {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Admin panel', 'admin_back')]])
+    }
+  );
+}
+
+// ── ✅ YANGI: Turnirni qayta ochish ─────────────────────────────────────────
+async function reopenTournament(ctx) {
+  if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('❌ Ruxsat yo\'q!');
+  await Settings.findByIdAndUpdate(
+    'config',
+    { votingClosed: false, closedAt: null, updatedAt: new Date() },
+    { upsert: true, new: true }
+  );
+  await ctx.editMessageText(
+    `🔓 *Turnir qayta ochildi!*\n\nOvoz berish yana faollashtirildi.`,
+    {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([[Markup.button.callback('🏠 Admin panel', 'admin_back')]])
+    }
+  );
+}
+
+// ── ✅ YANGI: PDF uchun o'qituvchilarni tanlash (sahifali) ──────────────────
+async function showVotersPdfTeachers(ctx, page = 0) {
+  if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('❌ Ruxsat yo\'q!');
+  const PAGE_SIZE = 5;
+  const teachers = await Teacher.find().sort({ name: 1 }).lean();
+
+  if (!teachers.length) {
+    return ctx.editMessageText('👨‍🏫 Hali o\'qituvchi yo\'q.',
+      Markup.inlineKeyboard([[Markup.button.callback('🔙 Orqaga', 'admin_back')]])
+    );
+  }
+
+  const totalPages = Math.ceil(teachers.length / PAGE_SIZE);
+  const start = page * PAGE_SIZE;
+  const pageTeachers = teachers.slice(start, start + PAGE_SIZE);
+
+  const buttons = pageTeachers.map(t =>
+    [Markup.button.callback(`👨‍🏫 ${t.name}`, `admin_vpdf_teacher_${t.telegramId}_0`)]
+  );
+
+  const navRow = [];
+  if (page > 0) navRow.push(Markup.button.callback('⬅️', `admin_voters_pdf_page_${page - 1}`));
+  navRow.push(Markup.button.callback('🔙 Orqaga', 'admin_back'));
+  if (page < totalPages - 1) navRow.push(Markup.button.callback('➡️', `admin_voters_pdf_page_${page + 1}`));
+  buttons.push(navRow);
+
+  const pageInfo = totalPages > 1 ? ` (${page + 1}/${totalPages})` : '';
+  await ctx.editMessageText(
+    `📄 *Ovoz berganlar (PDF)*\n\nQaysi o'qituvchi?${pageInfo}`,
+    { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) }
+  );
+}
+
+// ── ✅ YANGI: PDF uchun guruh tanlash (sahifali) ────────────────────────────
+async function showVotersPdfGroups(ctx, teacherId, page = 0) {
+  if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('❌ Ruxsat yo\'q!');
+  const PAGE_SIZE = 5;
+  const teacher = await Teacher.findOne({ telegramId: parseInt(teacherId) });
+  if (!teacher) return ctx.answerCbQuery('Topilmadi!');
+
+  const groups = await Group.find({ teacherId: teacher.telegramId }).sort({ groupId: 1 }).lean();
+  if (!groups.length) {
+    return ctx.editMessageText(
+      `📋 *${teacher.name}* uchun guruh yo'q.`,
+      { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Orqaga', 'admin_voters_pdf')]]) }
+    );
+  }
+
+  const totalPages = Math.ceil(groups.length / PAGE_SIZE);
+  const start = page * PAGE_SIZE;
+  const pageGroups = groups.slice(start, start + PAGE_SIZE);
+
+  const buttons = pageGroups.map(g => [
+    Markup.button.callback(
+      `#${g.groupId} | ${g.timeSlot} | ${g.name} | 🗳${g.votes}`,
+      `admin_vpdf_group_${g.groupId}`
+    )
+  ]);
+
+  const navRow = [];
+  if (page > 0) navRow.push(Markup.button.callback('⬅️', `admin_vpdf_teacher_${teacherId}_${page - 1}`));
+  navRow.push(Markup.button.callback('🔙 Orqaga', 'admin_voters_pdf'));
+  if (page < totalPages - 1) navRow.push(Markup.button.callback('➡️', `admin_vpdf_teacher_${teacherId}_${page + 1}`));
+  buttons.push(navRow);
+
+  const pageInfo = totalPages > 1 ? ` (${page + 1}/${totalPages})` : '';
+  await ctx.editMessageText(
+    `📄 *${teacher.name}* — guruhni tanlang:${pageInfo}`,
+    { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) }
+  );
+}
+
+// ── ✅ YANGI: Guruhga ovoz berganlar PDF faylini yuborish ───────────────────
+async function sendVotersPdf(ctx, groupId) {
+  if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('❌ Ruxsat yo\'q!');
+  const group = await Group.findOne({ groupId: parseInt(groupId) });
+  if (!group) return ctx.answerCbQuery('Guruh topilmadi!');
+  const teacher = await Teacher.findOne({ telegramId: group.teacherId });
+
+  await ctx.answerCbQuery('📄 PDF tayyorlanmoqda...');
+
+  // Ovozlarni sana bo'yicha olib, har bir userni topamiz
+  const votes = await Vote.find({ groupId: group.groupId }).sort({ votedAt: 1 }).lean();
+  const userIds = votes.map(v => v.userId);
+  const users = await User.find({ telegramId: { $in: userIds } }).lean();
+  const userMap = {};
+  users.forEach(u => { userMap[u.telegramId] = u; });
+
+  const voters = votes.map(v => ({
+    user: userMap[v.userId] || { telegramId: v.userId },
+    votedAt: v.votedAt
+  }));
+
+  try {
+    const pdfBuffer = await buildVotersPdf({ teacher, group, voters });
+    const safeName = (group.name || 'guruh').replace(/[^\w\-]+/g, '_').slice(0, 30);
+    const filename = `ovozlar_${group.groupId}_${safeName}.pdf`;
+
+    await ctx.replyWithDocument(
+      { source: pdfBuffer, filename },
+      {
+        caption:
+          `📄 *Ovoz berganlar*\n\n` +
+          `👨‍🏫 ${teacher?.name || '-'}\n` +
+          `📚 ${group.name} (#${group.groupId})\n` +
+          `🗳 Jami: ${voters.length} ta`,
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('🔙 Guruhlar', `admin_vpdf_teacher_${group.teacherId}_0`)],
+          [Markup.button.callback('🏠 Admin panel', 'admin_back')]
+        ])
+      }
+    );
+  } catch (err) {
+    console.error('❌ sendVotersPdf xatosi:', err);
+    await ctx.reply('❌ PDF yaratishda xatolik yuz berdi!');
+  }
 }
 
 // ── ✅ YANGI: O'qituvchilar ro'yxati (5 tadan sahifali) ─────────────────────
@@ -699,5 +890,9 @@ module.exports = {
   deleteGroup, deleteTeacher, showStats,
   // ✅ Yangi funksiyalar
   startBroadcast, sendBroadcast,
-  startGiftConfig, saveGift
+  startGiftConfig, saveGift,
+  // ✅ Turnirni tugatish
+  confirmEndTournament, endTournament, reopenTournament,
+  // ✅ Ovoz berganlar PDF
+  showVotersPdfTeachers, showVotersPdfGroups, sendVotersPdf
 };

@@ -4,6 +4,7 @@ const Teacher = require('../models/Teacher');
 const Group   = require('../models/Group');
 const Vote    = require('../models/Vote');
 const Gift    = require('../models/Gift');
+const Settings = require('../models/Settings');
 const { checkSubscription, getPaginatedGroupsKeyboard, escapeHtml } = require('../utils/helpers');
 const config  = require('../../config');
 
@@ -194,8 +195,27 @@ async function checkAndAskSubscription(ctx, user) {
   await showTeachersList(ctx);
 }
 
+// ── ✅ Turnir tugaganini bildiruvchi xabar ──────────────────────────────────
+async function showVotingClosed(ctx) {
+  const text =
+    '🛑 Turnir yakunlandi!\n\n' +
+    'Ovoz berish to\'xtatildi, endi ovoz qabul qilinmaydi.\n' +
+    'Ishtirok etganingiz uchun rahmat! 🎉\n\n' +
+    '🏆 Natijalarni ko\'rish uchun "Top 15" tugmasini bosing.';
+  const fn = ctx.callbackQuery ? ctx.editMessageText.bind(ctx) : ctx.reply.bind(ctx);
+  await fn(text, {
+    reply_markup: Markup.inlineKeyboard([
+      [Markup.button.callback('🏆 Top 15', 'show_top15')],
+      [Markup.button.callback('🎁 Sovg\'alar', 'show_gifts')]
+    ]).reply_markup
+  });
+}
+
 // ── O'qituvchilar ro'yxati (5 tadan sahifali) ───────────────────────────────
 async function showTeachersList(ctx, page = 0) {
+  // ✅ Turnir tugagan bo'lsa, ovoz berishga yo'l yo'q
+  if (await Settings.isVotingClosed()) return showVotingClosed(ctx);
+
   const PAGE_SIZE = 5;
   const teachers = await Teacher.find().sort({ name: 1 });
   
@@ -228,6 +248,9 @@ async function showTeachersList(ctx, page = 0) {
 
 // ── Teacher guruhlarini ko'rsatish ────────────────────────────────────────────
 async function showTeacherGroups(ctx, teacherId, page = 0) {
+  // ✅ Turnir tugagan bo'lsa, ovoz berishga yo'l yo'q
+  if (await Settings.isVotingClosed()) return showVotingClosed(ctx);
+
   const teacher = await Teacher.findOne({ telegramId: parseInt(teacherId) });
   if (!teacher) return ctx.answerCbQuery('Topilmadi!');
   
@@ -246,6 +269,9 @@ async function showTeacherGroups(ctx, teacherId, page = 0) {
 
 // ── Ovoz berish tasdiqlash ────────────────────────────────────────────────────
 async function showVoteConfirm(ctx, groupId, fromRef = false) {
+  // ✅ Turnir tugagan bo'lsa, ovoz berishga yo'l yo'q (referral ham)
+  if (await Settings.isVotingClosed()) return showVotingClosed(ctx);
+
   const group = await Group.findOne({ groupId: parseInt(groupId) });
   if (!group) {
     const fn = ctx.callbackQuery ? ctx.editMessageText.bind(ctx) : ctx.reply.bind(ctx);
@@ -293,6 +319,11 @@ async function showVoteConfirm(ctx, groupId, fromRef = false) {
 
 // ── ✅ OVOZ BERISH — Asosiy Logic (Referral Link bilan) ─────────────────────
 async function castVote(ctx, groupId) {
+  // ✅ Turnir tugagan bo'lsa, ovoz yozishni butunlay rad etamiz
+  if (await Settings.isVotingClosed()) {
+    return ctx.answerCbQuery('🛑 Turnir yakunlandi! Ovoz qabul qilinmaydi.', { show_alert: true });
+  }
+
   const group = await Group.findOne({ groupId: parseInt(groupId) });
   if (!group) return ctx.answerCbQuery('❌ Guruh topilmadi!', { show_alert: true });
   

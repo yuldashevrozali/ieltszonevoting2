@@ -143,6 +143,49 @@ bot.action('admin_gift_config', async ctx => {
   await adminHandler.startGiftConfig(ctx);
 });
 
+// ✅ Turnirni tugatish / qayta ochish
+bot.action('admin_end_tournament', async ctx => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  await adminHandler.confirmEndTournament(ctx);
+});
+
+bot.action('admin_end_tournament_confirm', async ctx => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  await adminHandler.endTournament(ctx);
+});
+
+bot.action('admin_reopen_tournament', async ctx => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  await adminHandler.reopenTournament(ctx);
+});
+
+// ✅ Ovoz berganlar (PDF)
+bot.action('admin_voters_pdf', async ctx => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  await adminHandler.showVotersPdfTeachers(ctx, 0);
+});
+
+bot.action(/^admin_voters_pdf_page_(\d+)$/, async ctx => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  await adminHandler.showVotersPdfTeachers(ctx, parseInt(ctx.match[1]));
+});
+
+bot.action(/^admin_vpdf_teacher_(\d+)_(\d+)$/, async ctx => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  await adminHandler.showVotersPdfGroups(ctx, ctx.match[1], parseInt(ctx.match[2]));
+});
+
+bot.action(/^admin_vpdf_group_(\d+)$/, async ctx => {
+  if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery();
+  await adminHandler.sendVotersPdf(ctx, ctx.match[1]);
+});
+
 bot.action(/^admin_teacher_(\d+)$/, async ctx => {
   await ctx.answerCbQuery();
   await adminHandler.showTeacherMenu(ctx, ctx.match[1]);
