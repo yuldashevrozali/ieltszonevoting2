@@ -371,7 +371,8 @@ async function startBroadcast(ctx) {
     `📢 *BROADCAST - Hammaga xabar yuborish*\n\n` +
     `Xabaringizni yuboring:\n` +
     `• Faqat matn: oddiy matn yuboring\n` +
-    `• Rasm+matn: rasm yuboring va caption qo'shing\n\n` +
+    `• Rasm+matn: rasm yuboring va caption qo'shing\n` +
+    `• Video+matn: video yuboring va caption qo'shing\n\n` +
     `⚠️ Bu barcha tasdiqlangan userlarga yuboriladi!\n` +
     `⏳ Jarayon biroz vaqt olishi mumkin.`,
     {
@@ -393,9 +394,15 @@ async function sendBroadcast(ctx, message) {
 
   for (const user of users) {
     try {
-      if (message.photo) {
+      if (message.video) {
+        // ✅ Video+matn yuborish
+        await ctx.telegram.sendVideo(user.telegramId, message.video, {
+          caption: message.text,
+          parse_mode: 'Markdown'
+        });
+      } else if (message.photo) {
         // ✅ Rasm+matn yuborish
-        await ctx.telegram.sendPhoto(user.telegramId, message.photo, { 
+        await ctx.telegram.sendPhoto(user.telegramId, message.photo, {
           caption: message.text,
           parse_mode: 'Markdown'
         });
@@ -515,13 +522,15 @@ async function handleAdminText(ctx) {
   // ✅ Rasm yoki matnni olish (ikkalasi uchun universal)
   const text = ctx.message?.text?.trim() || ctx.message?.caption?.trim() || '';
   const fileId = ctx.message?.photo?.[ctx.message.photo.length - 1]?.file_id || null; // Eng sifatli rasm
+  const videoId = ctx.message?.video?.file_id || null; // ✅ Video file_id
   const td = user.tempData || {};
 
   // ✅ Broadcast xabarni qabul qilish
   if (user.state === 'admin_broadcast_waiting') {
     const message = {
       text: text || '📢 Yangi xabar!',
-      photo: fileId // ✅ Rasm file_id ni ham o'tkazamiz
+      photo: fileId, // ✅ Rasm file_id ni ham o'tkazamiz
+      video: videoId // ✅ Video file_id ni ham o'tkazamiz
     };
     await ctx.reply('🔄 Yuborish boshlandi... Bu biroz vaqt olishi mumkin.');
     await sendBroadcast(ctx, message);

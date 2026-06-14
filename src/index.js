@@ -287,7 +287,19 @@ bot.on('text', async ctx => {
 // ═══════════════════════════════════════════════════════
 bot.on('photo', async ctx => {
   const user = await User.findOne({ telegramId: ctx.from.id });
-  
+
+  if (user?.state && ['admin_broadcast_waiting', 'admin_gift_waiting'].includes(user.state)) {
+    if (user.state.startsWith('admin_') && !isAdmin(ctx.from.id)) return;
+    return adminHandler.handleAdminText(ctx);
+  }
+});
+
+// ═══════════════════════════════════════════════════════
+//  ✅ VIDEO HANDLER (broadcast uchun video+matn)
+// ═══════════════════════════════════════════════════════
+bot.on('video', async ctx => {
+  const user = await User.findOne({ telegramId: ctx.from.id });
+
   if (user?.state && ['admin_broadcast_waiting', 'admin_gift_waiting'].includes(user.state)) {
     if (user.state.startsWith('admin_') && !isAdmin(ctx.from.id)) return;
     return adminHandler.handleAdminText(ctx);
